@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+swift-module-cache/
+build/
+output.pdf
+*.log
