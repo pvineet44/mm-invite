@@ -212,12 +212,15 @@ def generate_pdf_via_api(
     api_url: str,
     *,
     text: str,
+    file_name: Optional[str] = None,
     x_position: Optional[float] = None,
     y_position: Optional[float] = None,
     font_size: Optional[float] = None,
     text_color: Optional[str] = None,
 ) -> Dict[str, str]:
     payload: Dict[str, object] = {"text": text}
+    if file_name is not None:
+        payload["file_name"] = file_name
     if x_position is not None:
         payload["x_position"] = x_position
     if y_position is not None:
@@ -486,9 +489,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 continue
 
         try:
+            desired_file_name = invitee.pdf_file_name()
             pdf_result = generate_pdf_via_api(
                 pdf_api_url,
                 text=invitee.display_name or "",
+                file_name=desired_file_name,
             )
         except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(

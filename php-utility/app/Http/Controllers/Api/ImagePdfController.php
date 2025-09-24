@@ -23,6 +23,7 @@ class ImagePdfController extends Controller
     {
         $validated = $request->validate([
             'text' => ['required', 'string', 'max:255'],
+            'file_name' => ['nullable', 'string', 'max:255'],
             'x_position' => ['nullable', 'numeric', 'between:0,100'],
             'y_position' => ['nullable', 'numeric', 'between:0,100'],
             'font_size' => ['nullable', 'numeric', 'between:8,200'],
@@ -75,9 +76,15 @@ class ImagePdfController extends Controller
             abort(500, 'Unable to prepare PDF output directory.');
         }
 
-        $fileName = 'invite-' . Str::uuid() . '.pdf';
+        $fileName = $this->desiredFileName($validated['file_name'] ?? $validated['text']);
         $relativePath = 'pdfs/' . $fileName;
         $absolutePath = rtrim($targetDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
+
+        if (file_exists($absolutePath)) {
+            $absolutePath = $this->uniquifyPath($absolutePath);
+            $relativePath = 'pdfs/' . basename($absolutePath);
+            $fileName = basename($absolutePath);
+        }
 
         if (file_put_contents($absolutePath, $pdfBinary) === false) {
             abort(500, 'Failed to write generated PDF.');
@@ -165,5 +172,44 @@ class ImagePdfController extends Controller
             'image/webp' => 'webp',
             default => 'jpeg',
         };
+    }
+
+    private function desiredFileName(?string $input): string
+    {
+        $input = trim((string) $input);
+
+        if ($input === '') {
+            $input = 'invite';
+        }
+
+        $input = preg_replace('/[\\\/:*?"<>|]/', ' ', $input) ?? 'invite';
+        $input = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $input) ?? $input;
+        $input = preg_replace('/\s+/', ' ', $input) ?? $input;
+        $input = trim($input);
+
+        if ($input === '') {
+            $input = 'invite';
+        }
+
+        if (! Str::of($input)->lower()->endsWith('.pdf')) {
+            $input .= '.pdf';
+        }
+
+        return $input;
+    }
+
+    private function uniquifyPath(string $absolutePath): string
+    {
+        $directory = dirname($absolutePath);
+        $baseName = pathinfo($absolutePath, PATHINFO_FILENAME);
+        $extension = pathinfo($absolutePath, PATHINFO_EXTENSION);
+        $counter = 1;
+
+        do {
+            $candidate = $directory . DIRECTORY_SEPARATOR . $baseName . ' (' . $counter . ').' . $extension;
+            $counter++;
+        } while (file_exists($candidate));
+
+        return $candidate;
     }
 }
