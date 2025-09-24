@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 class ImagePdfController extends Controller
@@ -63,19 +62,33 @@ class ImagePdfController extends Controller
             'pdfScale' => $pdfScale,
         ])->render();
 
-        $filename = 'generated/' . Str::uuid() . '.pdf';
-        Storage::disk('public')->put($filename, Pdf::loadHTML($pdfHtml)
+        $pdfBinary = Pdf::loadHTML($pdfHtml)
             ->setPaper($paper)
             ->setOption('dpi', self::PDF_DPI)
             ->setOption('isRemoteEnabled', true)
             ->setOption('isHtml5ParserEnabled', true)
-            ->output());
+            ->output();
 
-        $url = Storage::disk('public')->url($filename);
+        $targetDirectory = realpath(base_path('../pdfs')) ?: base_path('../pdfs');
+
+        if (! is_dir($targetDirectory) && ! mkdir($targetDirectory, 0775, true) && ! is_dir($targetDirectory)) {
+            abort(500, 'Unable to prepare PDF output directory.');
+        }
+
+        $fileName = 'invite-' . Str::uuid() . '.pdf';
+        $relativePath = 'pdfs/' . $fileName;
+        $absolutePath = rtrim($targetDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
+
+        if (file_put_contents($absolutePath, $pdfBinary) === false) {
+            abort(500, 'Failed to write generated PDF.');
+        }
+
+        $baseUrl = rtrim(config('app.url', url('/')), '/');
+        $url = $baseUrl . '/' . $relativePath;
 
         return response()->json([
             'url' => $url,
-            'path' => $filename,
+            'path' => $relativePath,
         ], 201);
     }
 

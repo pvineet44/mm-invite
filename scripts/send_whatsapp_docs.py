@@ -540,7 +540,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             summary["sent"] += 1
         except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(
-                f"Failed to send {pdf_path.name} to {invitee.country_code} {invitee.phone}: {exc}\n"
+                f"Failed to send {file_name} to {invitee.country_code} {invitee.phone}: {exc}\n"
             )
             summary["failed"] += 1
 
