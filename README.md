@@ -43,21 +43,21 @@ Optional flags:
 
 ## CSV Columns
 
-The script looks for the following column names (case-sensitive) and falls back to common alternatives:
+The script expects the newer format with a `Name` column and falls back to legacy columns only if needed:
 
-- `first_name` (`firstName`, `firstname`)
-- `last_name` (`lastName`, `lastname`)
-- `gender` (`salutation`)
-- `phone` (`mobileNo`, `mobile`)
-- `country_code` (`countryCode`, `isdCode`)
+- `Name` (`name`, `display_name`, `full_name`) — required; the PDF is resolved as `<Name>.pdf` unless an explicit `pdf_file` column is provided.
+- `pdf_file` (`pdfFile`, `pdf_name`, `pdfName`, `pdf_filename`, `pdfFilename`) — optional explicit PDF filename.
+- `phone` (`mobileNo`, `mobile`) — required.
+- `country_code` (`countryCode`, `isdCode`) — optional; defaults to `91` when blank.
+- Legacy support: `first_name`, `last_name`, and `gender` are still read to build a fallback display name if `Name` is missing.
 
 Rows missing the required values are skipped with an error message.
 
 ## Interakt Payload
 
-By default the helper posts multipart form data to `https://api.interakt.ai/v1/public/message/` with `type = Document` and the PDF attached as `documentFile`.
+By default the helper POSTs JSON to `https://api.interakt.ai/v1/public/message/` with `type = Document`, supplying a hosted PDF URL via `data.mediaUrl`. Optional message text and `callbackData` can be provided with `--document-message` / `--callback-data`.
 
-When `--template-name` is supplied, the script switches to a template send: it posts `type = Template`, attaches the PDF, and includes your template metadata as a JSON payload in the `template` field. Update `send_template_document` in `scripts/send_whatsapp_docs.py` if Interakt expects different field names for document headers in your workspace.
+When `--template-name` is supplied, the script switches to a template send: it posts `type = Template` and includes your template metadata (plus hosted PDF URL) in the `template` object. Update `send_template_document` in `scripts/send_whatsapp_docs.py` if Interakt expects different fields for your workspace.
 
 ## Node Variant (Optional)
 

@@ -8,11 +8,11 @@ import csv
 import json
 import os
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib import error, request
+from urllib.parse import quote
 
 API_ENDPOINT = "https://api.interakt.ai/v1/public/message/"
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -21,33 +21,40 @@ DEFAULT_PDF_DIR = ROOT_DIR / "pdfs"
 DEFAULT_ENV_FILE = ROOT_DIR / ".env"
 DEFAULT_TEMPLATE_NAME = None
 DEFAULT_TEMPLATE_LANGUAGE = "en"
+DEFAULT_MEDIA_BASE_URL = "https://mm.purebillion.tech/pdfs/"
+DEFAULT_DOCUMENT_MESSAGE = ""
 
 FIELD_FALLBACKS = {
+    "display_name": ("display_name", "Display Name", "name", "Name", "full_name", "fullName"),
     "first_name": ("first_name", "firstName", "firstname"),
     "last_name": ("last_name", "lastName", "lastname"),
     "gender": ("gender", "salutation"),
     "phone": ("phone", "mobileNo", "mobile"),
     "country_code": ("country_code", "countryCode", "isdCode"),
+    "pdf_file": ("pdf_file", "pdfFile", "pdf_name", "pdfName", "pdf_filename", "pdfFilename"),
 }
 
 
 @dataclass
 class Invitee:
     line_no: int
-    first_name: str
-    last_name: str
-    gender: str
     phone: str
     country_code: str
+    display_name: str
+    pdf_override: Optional[str] = None
 
     def pdf_file_name(self) -> str:
-        first = self.first_name.strip()
-        gender = self.gender.strip()
-        last = self.last_name.strip()
-        return f"Shri {first}{gender} {last}.pdf"
+        base_name = self.pdf_override.strip() if self.pdf_override else self.display_name.strip()
+        if not base_name:
+            raise ValueError("Invitee lacks sufficient information to derive PDF file name")
+        return self._ensure_pdf_suffix(base_name)
 
     def pdf_path(self, directory: Path) -> Path:
         return directory / self.pdf_file_name()
+
+    @staticmethod
+    def _ensure_pdf_suffix(name: str) -> str:
+        return name if name.lower().endswith(".pdf") else f"{name}.pdf"
 
 
 class CsvError(RuntimeError):
@@ -87,6 +94,24 @@ def parse_arguments(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pdf-dir", dest="pdf_dir", default=DEFAULT_PDF_DIR, type=Path)
     parser.add_argument("--resume-from", dest="resume_from", default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
+    parser.add_argument(
+        "--media-base-url",
+        dest="media_base_url",
+        default=os.environ.get("WHATSAPP_MEDIA_BASE_URL", DEFAULT_MEDIA_BASE_URL),
+        help="Base URL used to build mediaUrl for PDFs.",
+    )
+    parser.add_argument(
+        "--document-message",
+        dest="document_message",
+        default=os.environ.get("WHATSAPP_DOCUMENT_MESSAGE", DEFAULT_DOCUMENT_MESSAGE),
+        help="Optional WhatsApp message to accompany document sends.",
+    )
+    parser.add_argument(
+        "--callback-data",
+        dest="callback_data",
+        default=os.environ.get("WHATSAPP_CALLBACK_DATA", ""),
+        help="Optional callbackData value echoed by Interakt webhooks.",
+    )
     parser.add_argument(
         "--env-file",
         dest="env_file",
@@ -132,19 +157,26 @@ def read_invitees(csv_path: Path) -> List[Invitee]:
             invitees: List[Invitee] = []
             for index, row in enumerate(reader, start=2):  # account for header
                 record = {key: (value or "").strip() for key, value in row.items() if key}
-                first = pick_first(record, FIELD_FALLBACKS["first_name"])
-                last = pick_first(record, FIELD_FALLBACKS["last_name"])
-                gender = pick_first(record, FIELD_FALLBACKS["gender"])
+                first = pick_first(record, FIELD_FALLBACKS.get("first_name", ()))
+                last = pick_first(record, FIELD_FALLBACKS.get("last_name", ()))
+                gender = pick_first(record, FIELD_FALLBACKS.get("gender", ()))
+                display_name = pick_first(record, FIELD_FALLBACKS["display_name"])
+                pdf_override = pick_first(record, FIELD_FALLBACKS["pdf_file"]) or None
                 phone = pick_first(record, FIELD_FALLBACKS["phone"])
                 country_code = pick_first(record, FIELD_FALLBACKS["country_code"]) or "+91"
+
+                if not display_name and (first or last or gender):
+                    first_gender = f"{first}{gender}".strip()
+                    parts = ["Shri", first_gender, last]
+                    display_name = " ".join(part for part in parts if part).strip()
+
                 invitees.append(
                     Invitee(
                         line_no=index,
-                        first_name=first,
-                        last_name=last,
-                        gender=gender,
                         phone=phone,
                         country_code=normalise_country_code(country_code),
+                        display_name=display_name.strip(),
+                        pdf_override=pdf_override,
                     )
                 )
     except FileNotFoundError as exc:
@@ -158,8 +190,9 @@ def read_invitees(csv_path: Path) -> List[Invitee]:
 def normalise_country_code(code: str) -> str:
     code = code.strip()
     if not code:
-        return "+91"
-    return code if code.startswith("+") else f"+{code}"
+        return "91"
+    # Interakt expects country codes without a leading plus sign.
+    return code[1:] if code.startswith("+") else code
 
 
 def parse_body_values(raw: str) -> List[str]:
@@ -168,50 +201,46 @@ def parse_body_values(raw: str) -> List[str]:
     return [value.strip() for value in raw.split(",")]
 
 
-def encode_multipart(fields: Dict[str, str], files: Dict[str, Tuple[str, str, bytes]]) -> Tuple[str, bytes]:
-    boundary = uuid.uuid4().hex
-    body = bytearray()
-
-    for name, value in fields.items():
-        body.extend(f"--{boundary}\r\n".encode())
-        body.extend(f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n".encode())
-        body.extend(value.encode())
-        body.extend(b"\r\n")
-
-    for name, (filename, content_type, data) in files.items():
-        body.extend(f"--{boundary}\r\n".encode())
-        body.extend(
-            f"Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n".encode()
-        )
-        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode())
-        body.extend(data)
-        body.extend(b"\r\n")
-
-    body.extend(f"--{boundary}--\r\n".encode())
-    content_type = f"multipart/form-data; boundary={boundary}"
-    return content_type, bytes(body)
-
-
 class InteraktClient:
-    def __init__(self, api_key: str, endpoint: str = API_ENDPOINT) -> None:
+    def __init__(self, api_key: str, endpoint: str = API_ENDPOINT, *, media_base_url: str) -> None:
         self.api_key = api_key
         self.endpoint = endpoint
+        self.media_base_url = media_base_url
 
-    def send_document(self, *, country_code: str, phone_number: str, pdf_path: Path) -> Dict[str, object]:
-        pdf_bytes = pdf_path.read_bytes()
+    def build_media_url(self, file_name: str) -> str:
+        return f"{self.media_base_url}{quote(file_name)}"
+
+    @staticmethod
+    def _format_country_code(country_code: str) -> str:
+        return country_code if country_code.startswith("+") else f"+{country_code}"
+
+    def send_document(
+        self,
+        *,
+        country_code: str,
+        phone_number: str,
+        pdf_path: Path,
+        message: str,
+        callback_data: str,
+    ) -> Dict[str, object]:
         file_name = pdf_path.name
+        media_url = self.build_media_url(file_name)
 
-        fields = {
-            "countryCode": country_code,
+        payload = {
+            "countryCode": self._format_country_code(country_code),
             "phoneNumber": phone_number,
             "type": "Document",
-            "fileName": file_name,
-        }
-        files = {
-            "documentFile": (file_name, "application/pdf", pdf_bytes),
+            "data": {
+                "mediaUrl": media_url,
+            },
         }
 
-        content_type, body = encode_multipart(fields, files)
+        if message:
+            payload["data"]["message"] = message
+        if callback_data:
+            payload["callbackData"] = callback_data
+
+        body = json.dumps(payload).encode("utf-8")
 
         request_obj = request.Request(
             self.endpoint,
@@ -219,7 +248,7 @@ class InteraktClient:
             method="POST",
             headers={
                 "Authorization": f"Basic {self.api_key}",
-                "Content-Type": content_type,
+                "Content-Type": "application/json",
             },
         )
 
@@ -251,33 +280,30 @@ class InteraktClient:
         template_name: str,
         template_language: str,
         body_values: List[str],
+        callback_data: str,
     ) -> Dict[str, object]:
-        pdf_bytes = pdf_path.read_bytes()
         file_name = pdf_path.name
+        media_url = self.build_media_url(file_name)
 
         template_payload = {
             "name": template_name,
             "languageCode": template_language,
             "bodyValues": body_values,
-            "headerValues": {
-                "document": {
-                    "fileName": file_name,
-                    "isTemplateHeader": True,
-                }
-            },
+            "headerValues": [media_url],
+            "fileName": file_name,
         }
 
-        fields = {
-            "countryCode": country_code,
+        payload = {
+            "countryCode": self._format_country_code(country_code),
             "phoneNumber": phone_number,
             "type": "Template",
-            "template": json.dumps(template_payload),
-        }
-        files = {
-            "documentFile": (file_name, "application/pdf", pdf_bytes),
+            "template": template_payload,
         }
 
-        content_type, body = encode_multipart(fields, files)
+        if callback_data:
+            payload["callbackData"] = callback_data
+
+        body = json.dumps(payload).encode("utf-8")
 
         request_obj = request.Request(
             self.endpoint,
@@ -285,7 +311,7 @@ class InteraktClient:
             method="POST",
             headers={
                 "Authorization": f"Basic {self.api_key}",
-                "Content-Type": content_type,
+                "Content-Type": "application/json",
             },
         )
 
@@ -320,6 +346,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     template_name: Optional[str] = args.template_name
     template_language: str = args.template_language
     template_body_values = parse_body_values(args.template_body_values)
+    media_base_url = args.media_base_url.strip() or DEFAULT_MEDIA_BASE_URL
+    if not media_base_url.endswith("/"):
+        media_base_url = f"{media_base_url}/"
+    document_message = args.document_message.strip()
+    callback_data = args.callback_data.strip()
 
     load_env_file(env_file)
 
@@ -342,7 +373,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         sys.stderr.write("WHATSAPP_API_KEY must be set unless --dry-run is enabled.\n")
         return 1
 
-    client = InteraktClient(api_key) if not dry_run else None
+    client = (
+        InteraktClient(
+            api_key,
+            media_base_url=media_base_url,
+        )
+        if not dry_run
+        else None
+    )
 
     summary = {
         "total": len(invitees),
@@ -357,16 +395,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     for invitee in invitees:
         summary["processed"] += 1
 
-        if not invitee.first_name or not invitee.last_name or not invitee.gender:
+        if not invitee.display_name:
             sys.stderr.write(
-                f"Skipping line {invitee.line_no}: missing first name, last name, or gender.\n"
+                f"Skipping line {invitee.line_no}: missing name information.\n"
             )
             summary["skipped"] += 1
             continue
 
         if not invitee.phone:
             sys.stderr.write(
-                f"Skipping {invitee.first_name} {invitee.last_name} (line {invitee.line_no}): missing phone.\n"
+                f"Skipping {invitee.display_name or 'unknown name'} (line {invitee.line_no}): missing phone.\n"
             )
             summary["skipped"] += 1
             continue
@@ -381,15 +419,21 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         pdf_path = invitee.pdf_path(pdf_dir)
         if not pdf_path.is_file():
             sys.stderr.write(
-                f"PDF not found for {invitee.first_name} {invitee.last_name} (expected at {pdf_path}).\n"
+                f"PDF not found for {invitee.display_name or 'unknown name'} (expected at {pdf_path}).\n"
             )
             summary["failed"] += 1
             continue
 
         if dry_run:
             mode = "template" if template_name else "document"
+            extra = []
+            if document_message and not template_name:
+                extra.append(f"message='{document_message}'")
+            if callback_data:
+                extra.append(f"callbackData='{callback_data}'")
+            extra_suffix = f" ({', '.join(extra)})" if extra else ""
             print(
-                f"[dry-run] Would send {pdf_path.name} ({mode}) to {invitee.country_code} {invitee.phone}."
+                f"[dry-run] Would send {pdf_path.name} ({mode}) to {invitee.country_code} {invitee.phone}{extra_suffix}."
             )
             summary["sent"] += 1
             continue
@@ -404,12 +448,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                     template_name=template_name,
                     template_language=template_language,
                     body_values=template_body_values,
+                    callback_data=callback_data,
                 )
             else:
                 client.send_document(
                     country_code=invitee.country_code,
                     phone_number=invitee.phone,
                     pdf_path=pdf_path,
+                    message=document_message,
+                    callback_data=callback_data,
                 )
             print(f"Sent {pdf_path.name} to {invitee.country_code} {invitee.phone}.")
             summary["sent"] += 1
