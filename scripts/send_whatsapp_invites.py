@@ -403,11 +403,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 callback_data=callback_data,
             )
 
+            # Always log the API response for debugging
             print(f"Sent template to {invitee.country_code} {invitee.phone} with PDF: {pdf_filename}")
+            print(f"  API Response: {json.dumps(result, indent=2)}")
 
-            # Log the API response for debugging
             if "result" in result and not result.get("result"):
-                sys.stderr.write(f"  API Response: {json.dumps(result, indent=2)}\n")
+                sys.stderr.write(f"  WARNING: API returned failure\n")
 
             summary["sent"] += 1
         except Exception as exc:  # pylint: disable=broad-except
