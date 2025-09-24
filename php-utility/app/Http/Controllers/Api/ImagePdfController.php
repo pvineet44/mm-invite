@@ -182,7 +182,7 @@ class ImagePdfController extends Controller
             $input = 'invite';
         }
 
-        $input = preg_replace('/[\\\/:*?"<>|]/', ' ', $input) ?? 'invite';
+        $input = preg_replace('/[\\\/:*?"<>|]/u', ' ', $input) ?? 'invite';
         $input = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $input) ?? $input;
         $input = preg_replace('/\s+/', ' ', $input) ?? $input;
         $input = trim($input);
