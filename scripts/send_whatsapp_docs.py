@@ -19,10 +19,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CSV = ROOT_DIR / "csvs" / "test.csv"
 DEFAULT_PDF_DIR = ROOT_DIR / "pdfs"
 DEFAULT_ENV_FILE = ROOT_DIR / ".env"
-DEFAULT_TEMPLATE_NAME = None
+DEFAULT_TEMPLATE_NAME = "mm_utility_template"
 DEFAULT_TEMPLATE_LANGUAGE = "en"
 DEFAULT_MEDIA_BASE_URL = "https://mm.purebillion.tech/pdfs/"
 DEFAULT_DOCUMENT_MESSAGE = ""
+DEFAULT_PDF_API_URL = "http://127.0.0.1:8000/api/generate-pdf"
 
 FIELD_FALLBACKS = {
     "display_name": ("display_name", "Display Name", "name", "Name", "full_name", "fullName"),
@@ -137,6 +138,12 @@ def parse_arguments(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         default="",
         help="Comma-separated values for template body placeholders (if any).",
     )
+    parser.add_argument(
+        "--pdf-api-url",
+        dest="pdf_api_url",
+        default=os.environ.get("PDF_API_URL", DEFAULT_PDF_API_URL),
+        help="Endpoint for the Laravel PDF generation API.",
+    )
     return parser.parse_args(argv)
 
 
@@ -201,6 +208,72 @@ def parse_body_values(raw: str) -> List[str]:
     return [value.strip() for value in raw.split(",")]
 
 
+def generate_pdf_via_api(
+    api_url: str,
+    *,
+    text: str,
+    x_position: Optional[float] = None,
+    y_position: Optional[float] = None,
+    font_size: Optional[float] = None,
+    text_color: Optional[str] = None,
+) -> Dict[str, str]:
+    payload: Dict[str, object] = {"text": text}
+    if x_position is not None:
+        payload["x_position"] = x_position
+    if y_position is not None:
+        payload["y_position"] = y_position
+    if font_size is not None:
+        payload["font_size"] = font_size
+    if text_color is not None:
+        payload["text_color"] = text_color
+
+    body = json.dumps(payload).encode("utf-8")
+
+    request_obj = request.Request(
+        api_url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with request.urlopen(request_obj) as response:
+            response_body = response.read()
+            charset = response.headers.get_content_charset("utf-8")
+            text_body = response_body.decode(charset)
+            try:
+                data = json.loads(text_body)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"PDF API returned non-JSON payload: {text_body[:200]}"
+                ) from exc
+
+            if response.status not in (200, 201):
+                raise RuntimeError(
+                    f"PDF API responded with {response.status}: {data}"
+                )
+
+            if "url" not in data or "path" not in data:
+                raise RuntimeError(
+                    "PDF API response missing required 'url' or 'path' fields"
+                )
+
+            return {"url": str(data["url"]), "path": str(data["path"])}
+    except error.HTTPError as exc:
+        error_payload = exc.read()  # type: ignore[attr-defined]
+        try:
+            error_text = error_payload.decode("utf-8", "replace")
+        except Exception:  # pylint: disable=broad-except
+            error_text = "<unable to decode error payload>"
+        raise RuntimeError(
+            f"PDF API responded with {exc.code} {exc.reason}: {error_text}"
+        ) from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Failed to reach PDF API at {api_url}: {exc.reason}") from exc
+
 class InteraktClient:
     def __init__(self, api_key: str, endpoint: str = API_ENDPOINT, *, media_base_url: str) -> None:
         self.api_key = api_key
@@ -219,13 +292,11 @@ class InteraktClient:
         *,
         country_code: str,
         phone_number: str,
-        pdf_path: Path,
+        media_url: str,
+        file_name: str,
         message: str,
         callback_data: str,
     ) -> Dict[str, object]:
-        file_name = pdf_path.name
-        media_url = self.build_media_url(file_name)
-
         payload = {
             "countryCode": self._format_country_code(country_code),
             "phoneNumber": phone_number,
@@ -276,15 +347,13 @@ class InteraktClient:
         *,
         country_code: str,
         phone_number: str,
-        pdf_path: Path,
+        media_url: str,
+        file_name: str,
         template_name: str,
         template_language: str,
         body_values: List[str],
         callback_data: str,
     ) -> Dict[str, object]:
-        file_name = pdf_path.name
-        media_url = self.build_media_url(file_name)
-
         template_payload = {
             "name": template_name,
             "languageCode": template_language,
@@ -339,7 +408,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_arguments(argv)
 
     csv_path: Path = args.csv_path
-    pdf_dir: Path = args.pdf_dir
     resume_from: Optional[str] = args.resume_from
     dry_run: bool = args.dry_run
     env_file: Path = args.env_file
@@ -351,6 +419,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         media_base_url = f"{media_base_url}/"
     document_message = args.document_message.strip()
     callback_data = args.callback_data.strip()
+    pdf_api_url = args.pdf_api_url.strip() or os.environ.get("PDF_API_URL", DEFAULT_PDF_API_URL)
 
     load_env_file(env_file)
 
@@ -364,8 +433,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         print(f"No rows found in CSV {csv_path}.")
         return 0
 
-    if not pdf_dir.is_dir():
-        sys.stderr.write(f"PDF directory not found: {pdf_dir}\n")
+    if not pdf_api_url:
+        sys.stderr.write("PDF API URL must be provided via --pdf-api-url or PDF_API_URL env.\n")
         return 1
 
     api_key = os.environ.get("WHATSAPP_API_KEY", "").strip()
@@ -416,13 +485,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 summary["skipped"] += 1
                 continue
 
-        pdf_path = invitee.pdf_path(pdf_dir)
-        if not pdf_path.is_file():
+        try:
+            pdf_result = generate_pdf_via_api(
+                pdf_api_url,
+                text=invitee.display_name or "",
+            )
+        except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(
-                f"PDF not found for {invitee.display_name or 'unknown name'} (expected at {pdf_path}).\n"
+                f"Failed to generate PDF for {invitee.display_name or 'unknown name'}: {exc}\n"
             )
             summary["failed"] += 1
             continue
+
+        media_url = pdf_result["url"]
+        file_name = Path(pdf_result["path"]).name
 
         if dry_run:
             mode = "template" if template_name else "document"
@@ -433,7 +509,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 extra.append(f"callbackData='{callback_data}'")
             extra_suffix = f" ({', '.join(extra)})" if extra else ""
             print(
-                f"[dry-run] Would send {pdf_path.name} ({mode}) to {invitee.country_code} {invitee.phone}{extra_suffix}."
+                f"[dry-run] Would send {file_name} ({mode}) from {media_url} to {invitee.country_code} {invitee.phone}{extra_suffix}."
             )
             summary["sent"] += 1
             continue
@@ -444,7 +520,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 client.send_template_document(
                     country_code=invitee.country_code,
                     phone_number=invitee.phone,
-                    pdf_path=pdf_path,
+                    media_url=media_url,
+                    file_name=file_name,
                     template_name=template_name,
                     template_language=template_language,
                     body_values=template_body_values,
@@ -454,11 +531,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 client.send_document(
                     country_code=invitee.country_code,
                     phone_number=invitee.phone,
-                    pdf_path=pdf_path,
+                    media_url=media_url,
+                    file_name=file_name,
                     message=document_message,
                     callback_data=callback_data,
                 )
-            print(f"Sent {pdf_path.name} to {invitee.country_code} {invitee.phone}.")
+            print(f"Sent {file_name} (from {media_url}) to {invitee.country_code} {invitee.phone}.")
             summary["sent"] += 1
         except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(
