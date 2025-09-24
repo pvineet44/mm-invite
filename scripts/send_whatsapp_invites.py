@@ -20,7 +20,7 @@ DEFAULT_CSV = ROOT_DIR / "csvs" / "test.csv"
 DEFAULT_ENV_FILE = ROOT_DIR / ".env"
 DEFAULT_TEMPLATE_NAME = "mm_invite_v2"
 DEFAULT_TEMPLATE_LANGUAGE = "en"
-DEFAULT_HEADER_IMAGE = "https://mm.purebillion.tech/pdfs/header.png"
+DEFAULT_HEADER_IMAGE = "https://mm.purebillion.tech/pdfs/header-v2.png"
 DEFAULT_PDF_API_URL = "http://127.0.0.1:8000/api/generate-pdf"
 
 FIELD_FALLBACKS = {
