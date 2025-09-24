@@ -32,7 +32,6 @@ FIELD_FALLBACKS = {
     "gender": ("gender", "salutation"),
     "phone": ("phone", "mobileNo", "mobile"),
     "country_code": ("country_code", "countryCode", "isdCode"),
-    "pdf_file": ("pdf_file", "pdfFile", "pdf_name", "pdfName", "pdf_filename", "pdfFilename"),
 }
 
 
@@ -42,20 +41,6 @@ class Invitee:
     phone: str
     country_code: str
     display_name: str
-    pdf_override: Optional[str] = None
-
-    def pdf_file_name(self) -> str:
-        base_name = self.pdf_override.strip() if self.pdf_override else self.display_name.strip()
-        if not base_name:
-            raise ValueError("Invitee lacks sufficient information to derive PDF file name")
-        return self._ensure_pdf_suffix(base_name)
-
-    def pdf_path(self, directory: Path) -> Path:
-        return directory / self.pdf_file_name()
-
-    @staticmethod
-    def _ensure_pdf_suffix(name: str) -> str:
-        return name if name.lower().endswith(".pdf") else f"{name}.pdf"
 
 
 class CsvError(RuntimeError):
@@ -168,7 +153,6 @@ def read_invitees(csv_path: Path) -> List[Invitee]:
                 last = pick_first(record, FIELD_FALLBACKS.get("last_name", ()))
                 gender = pick_first(record, FIELD_FALLBACKS.get("gender", ()))
                 display_name = pick_first(record, FIELD_FALLBACKS["display_name"])
-                pdf_override = pick_first(record, FIELD_FALLBACKS["pdf_file"]) or None
                 phone = pick_first(record, FIELD_FALLBACKS["phone"])
                 country_code = pick_first(record, FIELD_FALLBACKS["country_code"]) or "+91"
 
@@ -183,7 +167,6 @@ def read_invitees(csv_path: Path) -> List[Invitee]:
                         phone=phone,
                         country_code=normalise_country_code(country_code),
                         display_name=display_name.strip(),
-                        pdf_override=pdf_override,
                     )
                 )
     except FileNotFoundError as exc:
@@ -208,27 +191,8 @@ def parse_body_values(raw: str) -> List[str]:
     return [value.strip() for value in raw.split(",")]
 
 
-def generate_pdf_via_api(
-    api_url: str,
-    *,
-    text: str,
-    file_name: Optional[str] = None,
-    x_position: Optional[float] = None,
-    y_position: Optional[float] = None,
-    font_size: Optional[float] = None,
-    text_color: Optional[str] = None,
-) -> Dict[str, str]:
+def generate_pdf_via_api(api_url: str, *, text: str) -> Dict[str, str]:
     payload: Dict[str, object] = {"text": text}
-    if file_name is not None:
-        payload["file_name"] = file_name
-    if x_position is not None:
-        payload["x_position"] = x_position
-    if y_position is not None:
-        payload["y_position"] = y_position
-    if font_size is not None:
-        payload["font_size"] = font_size
-    if text_color is not None:
-        payload["text_color"] = text_color
 
     body = json.dumps(payload).encode("utf-8")
 
@@ -489,11 +453,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 continue
 
         try:
-            desired_file_name = invitee.pdf_file_name()
             pdf_result = generate_pdf_via_api(
                 pdf_api_url,
                 text=invitee.display_name or "",
-                file_name=desired_file_name,
             )
         except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(

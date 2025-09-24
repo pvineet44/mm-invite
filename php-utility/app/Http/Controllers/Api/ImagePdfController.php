@@ -18,16 +18,13 @@ class ImagePdfController extends Controller
     private const DEFAULT_X_POSITION = 50.0;
     private const PDF_DPI = 96;
     private const MAX_PDF_POINTS = 14400; // DomPDF ~200 inch limit
+    private const FALLBACK_FILE_NAME = 'invite';
+    private const DISALLOWED_FILENAME_CHARS = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
     public function generate(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'text' => ['required', 'string', 'max:255'],
-            'file_name' => ['nullable', 'string', 'max:255'],
-            'x_position' => ['nullable', 'numeric', 'between:0,100'],
-            'y_position' => ['nullable', 'numeric', 'between:0,100'],
-            'font_size' => ['nullable', 'numeric', 'between:8,200'],
-            'text_color' => ['nullable', 'regex:/^#[0-9a-fA-F]{6}$/'],
         ]);
 
         $staticImagePath = public_path('static/static.jpg');
@@ -38,10 +35,10 @@ class ImagePdfController extends Controller
 
         [$imageWidth, $imageHeight] = $this->imageSize($staticImagePath);
 
-        $fontSize = (float) ($validated['font_size'] ?? self::FONT_SIZE);
-        $textColor = $validated['text_color'] ?? self::FONT_COLOR;
-        $xPercent = isset($validated['x_position']) ? (float) $validated['x_position'] : self::DEFAULT_X_POSITION;
-        $yPercent = isset($validated['y_position']) ? (float) $validated['y_position'] : self::VERTICAL_POSITION;
+        $fontSize = self::FONT_SIZE;
+        $textColor = self::FONT_COLOR;
+        $xPercent = self::DEFAULT_X_POSITION;
+        $yPercent = self::VERTICAL_POSITION;
 
         $imageDataUri = $this->toDataUri($staticImagePath);
 
@@ -76,7 +73,7 @@ class ImagePdfController extends Controller
             abort(500, 'Unable to prepare PDF output directory.');
         }
 
-        $fileName = $this->desiredFileName($validated['file_name'] ?? $validated['text']);
+        $fileName = $this->desiredFileName($validated['text']);
         $relativePath = 'pdfs/' . $fileName;
         $absolutePath = rtrim($targetDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
 
@@ -179,16 +176,14 @@ class ImagePdfController extends Controller
         $input = trim((string) $input);
 
         if ($input === '') {
-            $input = 'invite';
+            $input = self::FALLBACK_FILE_NAME;
         }
 
-        $input = preg_replace('/[\\\/:*?"<>|]/u', ' ', $input) ?? 'invite';
-        $input = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $input) ?? $input;
-        $input = preg_replace('/\s+/', ' ', $input) ?? $input;
-        $input = trim($input);
+        $input = $this->filterFileNameCharacters($input);
+        $input = $this->collapseWhitespace($input);
 
         if ($input === '') {
-            $input = 'invite';
+            $input = self::FALLBACK_FILE_NAME;
         }
 
         if (! Str::of($input)->lower()->endsWith('.pdf')) {
@@ -196,6 +191,61 @@ class ImagePdfController extends Controller
         }
 
         return $input;
+    }
+
+    private function filterFileNameCharacters(string $value): string
+    {
+        $length = mb_strlen($value);
+        $result = '';
+
+        for ($index = 0; $index < $length; $index++) {
+            $character = mb_substr($value, $index, 1);
+
+            if (in_array($character, self::DISALLOWED_FILENAME_CHARS, true)) {
+                $result .= ' ';
+                continue;
+            }
+
+            $codePoint = mb_ord($character);
+            if ($codePoint <= 31 || $codePoint === 127) {
+                $result .= ' ';
+                continue;
+            }
+
+            $result .= $character;
+        }
+
+        return $result;
+    }
+
+    private function collapseWhitespace(string $value): string
+    {
+        $length = mb_strlen($value);
+        $result = '';
+        $lastWasSpace = false;
+
+        for ($index = 0; $index < $length; $index++) {
+            $character = mb_substr($value, $index, 1);
+
+            if ($this->isSpaceCharacter($character)) {
+                if (! $lastWasSpace) {
+                    $result .= ' ';
+                    $lastWasSpace = true;
+                }
+
+                continue;
+            }
+
+            $result .= $character;
+            $lastWasSpace = false;
+        }
+
+        return trim($result);
+    }
+
+    private function isSpaceCharacter(string $character): bool
+    {
+        return trim($character) === '';
     }
 
     private function uniquifyPath(string $absolutePath): string
