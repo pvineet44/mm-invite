@@ -191,8 +191,10 @@ def parse_body_values(raw: str) -> List[str]:
     return [value.strip() for value in raw.split(",")]
 
 
-def generate_pdf_via_api(api_url: str, *, text: str) -> Dict[str, str]:
+def generate_pdf_via_api(api_url: str, *, text: str, filename: Optional[str] = None) -> Dict[str, str]:
     payload: Dict[str, object] = {"text": text}
+    if filename:
+        payload["filename"] = filename
 
     body = json.dumps(payload).encode("utf-8")
 
@@ -453,9 +455,15 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 continue
 
         try:
+            # Remove "Devanupriya " prefix for filename only
+            pdf_filename = invitee.display_name or ""
+            if pdf_filename.startswith("Devanupriya "):
+                pdf_filename = pdf_filename[12:]  # Remove "Devanupriya " (12 chars)
+
             pdf_result = generate_pdf_via_api(
                 pdf_api_url,
-                text=invitee.display_name or "",
+                text=invitee.display_name or "",  # Keep full name for PDF content
+                filename=pdf_filename,  # Use stripped name for filename
             )
         except Exception as exc:  # pylint: disable=broad-except
             sys.stderr.write(

@@ -25,6 +25,7 @@ class ImagePdfController extends Controller
     {
         $validated = $request->validate([
             'text' => ['required', 'string', 'max:255'],
+            'filename' => ['nullable', 'string', 'max:255'],
         ]);
 
         $staticImagePath = public_path('static/static.jpg');
@@ -73,7 +74,7 @@ class ImagePdfController extends Controller
             abort(500, 'Unable to prepare PDF output directory.');
         }
 
-        $fileName = $this->desiredFileName($validated['text']);
+        $fileName = $this->desiredFileName($validated['filename'] ?? $validated['text']);
         $relativePath = 'pdfs/' . $fileName;
         $absolutePath = rtrim($targetDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $fileName;
 
